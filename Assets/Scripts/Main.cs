@@ -40,7 +40,7 @@ struct AstcHeader
 }
 
 // kernel indices defined in ASTC_Encode.compute, named after Unity's TextureFormat enum for convenience.
-public enum ComputeShaderKernelIndex
+public enum ComputeShaderFormatToIndex
 {
     ASTC_RGB_4x4 = 0,
     ASTC_RGBA_4x4 = 1,
@@ -51,10 +51,14 @@ public enum ComputeShaderKernelIndex
 public class Main : MonoBehaviour
 {
     public ComputeShader shader = null;
-    public ComputeShaderKernelIndex kernel = ComputeShaderKernelIndex.ASTC_RGBA_4x4;
+    public ComputeShaderFormatToIndex kernel = ComputeShaderFormatToIndex.ASTC_RGBA_4x4;
     public Texture2D textureToCompress = null;
     public RawImage compressedTextureImage = null;
     public Text usedTimeText = null;
+
+    public Texture2D test;
+
+    public ComputeShader psnrShader = null;
 
     void Awake()
     {
@@ -78,10 +82,39 @@ public class Main : MonoBehaviour
 
         Debug.Log(textureToCompress.format);
 
-        var modeName = kernel.ToString();
-        int dimSize = int.Parse(modeName[modeName.Length - 1].ToString());
-        int texWidth = textureToCompress.width;
-        int texHeight = textureToCompress.height;
+        // Compress
+        var compressSw = new System.Diagnostics.Stopwatch();
+        compressSw.Start();
+        var compressedTexture = GpuAstcCompress(kernel, textureToCompress);
+        compressSw.Stop();
+        compressedTextureImage.texture = compressedTexture;
+        Debug.Log($"compress used time: {compressSw.ElapsedTicks / 10000f}ms");
+        Debug.Log(compressedTexture.format);
+
+        var psnrSw = new System.Diagnostics.Stopwatch();
+        psnrSw.Start();
+        var psnr = GpuCalculatePsnr(textureToCompress, compressedTexture);
+        Debug.Log($"gpu psnr: {psnr}");
+        psnrSw.Stop();
+        Debug.Log($"gpu psnr used time: {psnrSw.ElapsedTicks / 10000f}ms");
+
+        if (usedTimeText != null)
+        {
+            usedTimeText.text = $"Used time: {(compressSw.ElapsedTicks + psnrSw.ElapsedTicks) / 10000f}ms\n" +
+                $"Before mem: {textureToCompress.GetRawTextureData().Length / 1024f}KB\n" +
+                $"After mem: {compressedTexture.GetRawTextureData().Length / 1024f}KB\n" +
+                $"PSNR: {psnr}";
+        }
+    }
+
+    Texture2D GpuAstcCompress(ComputeShaderFormatToIndex format, Texture2D source)
+    {
+        string formatName = format.ToString();
+        int kernel = (int)format;
+
+        int dimSize = int.Parse(formatName[formatName.Length - 1].ToString());
+        int texWidth = source.width;
+        int texHeight = source.height;
         int xBlockNum = (texWidth + dimSize - 1) / dimSize;
         int yBlockNum = (texHeight + dimSize - 1) / dimSize;
         int totalBlockNum = xBlockNum * yBlockNum;
@@ -91,51 +124,120 @@ public class Main : MonoBehaviour
         int groupNumX = (texWidth + dimSize - 1) / dimSize;
         int groupNumY = (groupNum + groupNumX - 1) / groupNumX;
 
-        var stopwatch = new System.Diagnostics.Stopwatch();
-        stopwatch.Start();
-        
-        shader.SetTexture((int)kernel, "InTexture", textureToCompress);
+        var buffer = new ComputeBuffer(totalBlockNum, 16);
+        shader.SetTexture(kernel, "InTexture", source);
         shader.SetInt("InTexelWidth", texWidth);
         shader.SetInt("InTexelHeight", texHeight);
         shader.SetInt("InGroupNumX", groupNumX);
 
-        var buffer = new ComputeBuffer(totalBlockNum, 16);
-        shader.SetBuffer((int)kernel, "OutBuffer", buffer);
-        
-        shader.Dispatch((int)kernel, groupNumX, groupNumY, 1);
+        shader.SetBuffer(kernel, "OutBuffer", buffer);
+        shader.Dispatch(kernel, groupNumX, groupNumY, 1);
 
-        var header = new AstcHeader(dimSize, dimSize, texWidth, texHeight);
-        var compressedTexture = new Texture2D(texWidth, texHeight, (TextureFormat)Enum.Parse(typeof(TextureFormat), modeName), false);
-        using (var ms = new MemoryStream())
-        {
-            var headerByte = StructureToByteArray(header);
-            ms.Write(headerByte, 0, headerByte.Length);
-            var bodyByte = new byte[buffer.count * buffer.stride];
-            buffer.GetData(bodyByte);
-            ms.Write(bodyByte, 0, bodyByte.Length);
+        var compressedTexture = new Texture2D(texWidth, texHeight, (TextureFormat)Enum.Parse(typeof(TextureFormat), formatName), false);
+        byte[] bytes = new byte[Marshal.SizeOf(typeof(AstcHeader)) + buffer.count * buffer.stride];
+        var header = StructureToByteArray(new AstcHeader(dimSize, dimSize, texWidth, texHeight));
+        Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
+        buffer.GetData(bytes, header.Length, 0, buffer.count * buffer.stride);
 
 #if UNITY_EDITOR
-            using (var fs = new FileStream("test.astc", FileMode.Create))
-            {
-                ms.WriteTo(fs);
-            }
-#endif
-
-            compressedTexture.LoadRawTextureData(ms.ToArray());
-            compressedTexture.Apply();
-        }
-
-        compressedTextureImage.texture = compressedTexture;
-        buffer.Dispose();
-        stopwatch.Stop();
-
-        Debug.Log($"Used time: {stopwatch.ElapsedMilliseconds}ms");
-        Debug.Log(compressedTexture.format);
-
-        if (usedTimeText != null)
+        using (var fs = new FileStream("test.astc", FileMode.Create))
         {
-            usedTimeText.text = $"Used time: {stopwatch.ElapsedMilliseconds}ms";
+            fs.Write(bytes, 0, bytes.Length);
         }
+#endif
+        // decode
+        compressedTexture.LoadRawTextureData(bytes);
+        compressedTexture.Apply();
+
+        buffer.Dispose();
+
+        return compressedTexture;
+    }
+
+    float GpuCalculatePsnr(Texture2D source, Texture2D target)
+    {
+        if (source == null || target == null || source.texelSize != target.texelSize)
+        {
+            return float.MinValue;
+        }
+
+        int texWidth = source.width;
+        int texHeight = source.height;
+
+        // mse
+        int diffKernel = psnrShader.FindKernel("Diff");
+
+        psnrShader.SetTexture(diffKernel, "OriginalTexture", source);
+        psnrShader.SetTexture(diffKernel, "CompareTexture", target);
+        psnrShader.SetInt("InTexelWidth", texWidth);
+        psnrShader.SetInt("InTexelHeight", texHeight);
+
+        var outTexuture = new RenderTexture(texWidth, texHeight, 0, RenderTextureFormat.ARGBFloat);
+        outTexuture.enableRandomWrite = true;
+        outTexuture.Create();
+        psnrShader.SetTexture(diffKernel, "OutTexture", outTexuture);
+
+        psnrShader.Dispatch(diffKernel, texWidth / 8, texHeight / 8, 1);
+
+        // mse, reduce
+        int reduceKernel = psnrShader.FindKernel("Reduce");
+        psnrShader.SetInt("ThreadCount", 512);
+
+        psnrShader.SetTexture(reduceKernel, "OutTexture", outTexuture);
+        var outBuffer = new ComputeBuffer(texWidth * texHeight / 1024, sizeof(float) * 4);
+        psnrShader.SetBuffer(reduceKernel, "OutBuffer", outBuffer);
+        int texSize = texWidth * texHeight;
+        for (int i = texSize; i >= 1024;)
+        {
+            if (i == texSize)
+            {
+                psnrShader.SetBool("FirstStep", true);
+            }
+            i /= 1024;
+            psnrShader.Dispatch(reduceKernel, i, 1, 1);
+            psnrShader.SetBool("FirstStep", false);
+
+            if (i < 1024 && i != 1)
+            {
+                psnrShader.SetInt("ThreadCount", i);
+                psnrShader.Dispatch(reduceKernel, 1, 1, 1);
+            }
+        }
+
+        float[] result = new float[4];
+        outBuffer.GetData(result);
+        outBuffer.Dispose();
+
+        // psnr
+        float mse = (result[0] + result[1] + result[2] + result[3]) / texWidth / texHeight / 4f;
+        float psnr = (float)(10f * Math.Log10(1f * 1f / mse));
+
+        return psnr;
+    }
+
+    float CpuCalculatePsnr(Texture2D source, Texture2D target)
+    {
+        if (source == null || target == null || source.texelSize != target.texelSize)
+        {
+            return float.MinValue;
+        }
+
+        var sourcePx = source.GetPixels();
+        var targetPx = target.GetPixels();
+
+        Color accumulate = new Color(0, 0, 0, 0);
+        for (int i = 0; i < sourcePx.Length; i++)
+        {
+            var diff = sourcePx[i] - targetPx[i];
+            accumulate += diff * diff;
+        }
+        Debug.Log($"{accumulate.r}, {accumulate.g}, {accumulate.b}, {accumulate.a}");
+        Debug.Log((accumulate.r + accumulate.g + accumulate.b + accumulate.a));
+        float mse = (accumulate.r + accumulate.g + accumulate.b + accumulate.b) / sourcePx.Length / 4f;
+        Debug.Log(mse);
+        float psnr = (float)(10f * Math.Log10(1f * 1f / mse));
+
+        return psnr;
     }
 
     byte[] StructureToByteArray(object obj)

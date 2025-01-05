@@ -147,7 +147,7 @@ RectTransform:
   m_AnchorMin: {x: 0, y: 1}
   m_AnchorMax: {x: 0, y: 1}
   m_AnchoredPosition: {x: 75, y: -185.00003}
-  m_SizeDelta: {x: 350, y: 50}
+  m_SizeDelta: {x: 550, y: 200}
   m_Pivot: {x: 0, y: 1}
 --- !u!114 &333987186
 MonoBehaviour:
@@ -219,10 +219,12 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   shader: {fileID: 7200000, guid: 979e9a3d4902cec438423d161fcb6251, type: 3}
-  kernel: 1
-  textureToCompress: {fileID: 2800000, guid: c09b5e255125e4e448892346b3ed5c2e, type: 3}
+  kernel: 3
+  textureToCompress: {fileID: 2800000, guid: 32eb3bd4b455c7d4b9f541e6817aac70, type: 3}
   compressedTextureImage: {fileID: 581979163}
   usedTimeText: {fileID: 333987186}
+  test: {fileID: 2800000, guid: 54e0a13229200e74998f04a3264ce360, type: 3}
+  psnrShader: {fileID: 7200000, guid: e8860f84f9692da4b860546d02afc522, type: 3}
 --- !u!4 &356421737
 Transform:
   m_ObjectHideFlags: 0
