@@ -101,6 +101,8 @@ public class Main : MonoBehaviour
         if (usedTimeText != null)
         {
             usedTimeText.text = $"Used time: {(compressSw.ElapsedTicks + psnrSw.ElapsedTicks) / 10000f}ms\n" +
+                $"Compression: {compressSw.ElapsedTicks / 10000f}ms\n" +
+                $"PSNR Calc: {psnrSw.ElapsedTicks / 10000f}ms\n" +
                 $"Before mem: {textureToCompress.GetRawTextureData().Length / 1024f}KB\n" +
                 $"After mem: {compressedTexture.GetRawTextureData().Length / 1024f}KB\n" +
                 $"PSNR: {psnr}";
