@@ -1,6 +1,6 @@
 ﻿// Each #kernel tells which function to compile; you can have many kernels
-#pragma kernel Diff
-#pragma kernel Reduce
+//#pragma kernel Diff
+#pragma kernel OnePassPsnr
 
 Texture2D OriginalTexture;
 Texture2D CompareTexture;
@@ -8,22 +8,9 @@ Texture2D CompareTexture;
 int InTexelWidth;
 int InTexelHeight;
 
-// Create a RenderTexture with enableRandomWrite flag and set it
-// with cs.SetTexture
-RWTexture2D<float4> OutTexture;
-
-// MSE
-[numthreads(8,8,1)]
-void Diff(uint3 tid : SV_DispatchThreadID, uint index : SV_GroupIndex)
-{
-    float4 diff = OriginalTexture[tid.xy] - CompareTexture[tid.xy];
-    OutTexture[tid.xy] = diff * diff;
-}
-
-
-// MSE Reduce
+// psnr one pass
 #define THREAD_NUM 512
-#define REDUCTION_FUNC(src, id_0, id_1)  (src[id_0] + src[id_1])
+#define REDUCTION_FUNC(src, idA, idB)  (src[idA] + src[idB])
 
 bool FirstStep;
 uint ThreadCount;
@@ -32,13 +19,16 @@ RWStructuredBuffer<float4> OutBuffer;
 groupshared float4 SharedMem[THREAD_NUM];
 
 [numthreads(THREAD_NUM, 1, 1)]
-void Reduce(uint tid : SV_DispatchThreadID, uint gid: SV_GroupID, uint index: SV_GroupIndex)
+void OnePassPsnr(uint tid : SV_DispatchThreadID, uint gid : SV_GroupID, uint index : SV_GroupIndex)
 {
+    // divide and conquer, calculate mse over each pixel on the first step
     if (FirstStep)
     {
         uint2 texPosA = uint2((tid * 2) % InTexelWidth, (tid * 2) / InTexelHeight);
         uint2 texPosB = uint2((tid * 2 + 1) % InTexelWidth, (tid * 2 + 1) / InTexelHeight);
-        SharedMem[index] = REDUCTION_FUNC(OutTexture, texPosA, texPosB);
+        float4 diffA = OriginalTexture[texPosA] - CompareTexture[texPosA];
+        float4 diffB = OriginalTexture[texPosB] - CompareTexture[texPosB];
+        SharedMem[index] = diffA * diffA + diffB * diffB;
     }
     else
     {

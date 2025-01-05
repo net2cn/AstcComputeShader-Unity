@@ -91,12 +91,23 @@ public class Main : MonoBehaviour
         Debug.Log($"compress used time: {compressSw.ElapsedTicks / 10000f}ms");
         Debug.Log(compressedTexture.format);
 
+        // GPU PSNR
         var psnrSw = new System.Diagnostics.Stopwatch();
         psnrSw.Start();
         var psnr = GpuCalculatePsnr(textureToCompress, compressedTexture);
         Debug.Log($"gpu psnr: {psnr}");
         psnrSw.Stop();
         Debug.Log($"gpu psnr used time: {psnrSw.ElapsedTicks / 10000f}ms");
+
+#if UNITY_EDITOR
+        // CPU PSNR
+        var cpuPsnrSw = new System.Diagnostics.Stopwatch();
+        cpuPsnrSw.Start();
+        var cpuPsnr = CpuCalculatePsnr(textureToCompress, compressedTexture);
+        Debug.Log($"cpu psnr: {cpuPsnr}");
+        cpuPsnrSw.Stop();
+        Debug.Log($"cpu psnr used time: {cpuPsnrSw.ElapsedTicks / 10000f}ms");
+#endif
 
         if (usedTimeText != null)
         {
@@ -135,7 +146,7 @@ public class Main : MonoBehaviour
         shader.SetBuffer(kernel, "OutBuffer", buffer);
         shader.Dispatch(kernel, groupNumX, groupNumY, 1);
 
-        var compressedTexture = new Texture2D(texWidth, texHeight, (TextureFormat)Enum.Parse(typeof(TextureFormat), formatName), false);
+        // read encoded data from GPU
         byte[] bytes = new byte[Marshal.SizeOf(typeof(AstcHeader)) + buffer.count * buffer.stride];
         var header = StructureToByteArray(new AstcHeader(dimSize, dimSize, texWidth, texHeight));
         Buffer.BlockCopy(header, 0, bytes, 0, header.Length);
@@ -148,6 +159,7 @@ public class Main : MonoBehaviour
         }
 #endif
         // decode
+        var compressedTexture = new Texture2D(texWidth, texHeight, (TextureFormat)Enum.Parse(typeof(TextureFormat), formatName), false);
         compressedTexture.LoadRawTextureData(bytes);
         compressedTexture.Apply();
 
@@ -165,30 +177,22 @@ public class Main : MonoBehaviour
 
         int texWidth = source.width;
         int texHeight = source.height;
+        int texSize = texWidth * texHeight;
 
-        // mse
-        int diffKernel = psnrShader.FindKernel("Diff");
+        // psnr one pass
+        int reduceKernel = psnrShader.FindKernel("OnePassPsnr");
 
-        psnrShader.SetTexture(diffKernel, "OriginalTexture", source);
-        psnrShader.SetTexture(diffKernel, "CompareTexture", target);
+        psnrShader.SetTexture(reduceKernel, "OriginalTexture", source);
+        psnrShader.SetTexture(reduceKernel, "CompareTexture", target);
+
         psnrShader.SetInt("InTexelWidth", texWidth);
         psnrShader.SetInt("InTexelHeight", texHeight);
 
-        var outTexuture = new RenderTexture(texWidth, texHeight, 0, RenderTextureFormat.ARGBFloat);
-        outTexuture.enableRandomWrite = true;
-        outTexuture.Create();
-        psnrShader.SetTexture(diffKernel, "OutTexture", outTexuture);
-
-        psnrShader.Dispatch(diffKernel, texWidth / 8, texHeight / 8, 1);
-
-        // mse, reduce
-        int reduceKernel = psnrShader.FindKernel("Reduce");
         psnrShader.SetInt("ThreadCount", 512);
 
-        psnrShader.SetTexture(reduceKernel, "OutTexture", outTexuture);
         var outBuffer = new ComputeBuffer(texWidth * texHeight / 1024, sizeof(float) * 4);
         psnrShader.SetBuffer(reduceKernel, "OutBuffer", outBuffer);
-        int texSize = texWidth * texHeight;
+
         for (int i = texSize; i >= 1024;)
         {
             if (i == texSize)
@@ -206,11 +210,12 @@ public class Main : MonoBehaviour
             }
         }
 
+        // fetch from GPU
         float[] result = new float[4];
         outBuffer.GetData(result);
         outBuffer.Dispose();
 
-        // psnr
+        // avg psnr
         float mse = (result[0] + result[1] + result[2] + result[3]) / texWidth / texHeight / 4f;
         float psnr = (float)(10f * Math.Log10(1f * 1f / mse));
 
